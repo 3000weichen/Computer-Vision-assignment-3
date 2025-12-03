@@ -38,10 +38,10 @@ class CONFIG:
 
     NUM_CLASSES = 27
     MAX_TRAIN_SAMPLES = 10000     # 数据限制
-    FRAMES_PER_CLIP = 8          # 每个视频采样 8 帧
+    FRAMES_PER_CLIP = 16          # 每个视频采样 8 帧
 
-    BATCH_SIZE  = 16             # 时序模型显存更吃紧，batch 稍微小一点
-    NUM_WORKERS = 4
+    BATCH_SIZE  = 64             # 时序模型显存更吃紧，batch 稍微小一点
+    NUM_WORKERS = 16
     NUM_EPOCHS  = 25
     LR          = 3e-4
     WEIGHT_DECAY = 1e-4
@@ -149,15 +149,27 @@ class JesterMultiFrameDataset(Dataset):
 
     def _sample_indices(self, num_frames: int) -> List[int]:
         T = self.frames_per_clip
-        if num_frames >= T:
-            # 均匀采样 T 帧
-            indices = np.linspace(0, num_frames - 1, T, dtype=int).tolist()
+
+        if self.is_train:
+            if num_frames >= T:
+                # 均匀采样 T 帧
+                indices = np.linspace(2, num_frames - 2, T, dtype=int).tolist()
+            else:
+                # 帧数不够: 重复某些帧填满 T
+                base = np.arange(num_frames)
+                reps = int(np.ceil(T / num_frames))
+                tiled = np.tile(base, reps)
+                indices = tiled[:T].tolist()
         else:
-            # 帧数不够: 重复某些帧填满 T
-            base = np.arange(num_frames)
-            reps = int(np.ceil(T / num_frames))
-            tiled = np.tile(base, reps)
-            indices = tiled[:T].tolist()
+            if num_frames >= T:
+                # 均匀采样 T 帧
+                indices = np.linspace(0, num_frames - 1, T, dtype=int).tolist()
+            else:
+                # 帧数不够: 重复某些帧填满 T
+                base = np.arange(num_frames)
+                reps = int(np.ceil(T / num_frames))
+                tiled = np.tile(base, reps)
+                indices = tiled[:T].tolist()
         return indices
 
     def __getitem__(self, idx):
@@ -271,8 +283,12 @@ class GestureTimeSeriesNet(nn.Module):
 def train_one_epoch(model, loader, criterion, optimizer, device):
     model.train()
     total_loss, total_correct, total_samples = 0.0, 0, 0
+    for batch_idx, (frames, labels) in enumerate(loader):
+        if batch_idx == 0:
+            print("  [DEBUG] first train batch loaded")
+        if (batch_idx + 1) % 50 == 0:
+            print(f"  [DEBUG] val batch {batch_idx+1}")
 
-    for frames, labels in loader:
         frames = frames.to(device)   # [B, T, C, H, W]
         labels = labels.to(device)
 
@@ -295,7 +311,11 @@ def evaluate(model, loader, criterion, device):
     model.eval()
     total_loss, total_correct, total_samples = 0.0, 0, 0
 
-    for frames, labels in loader:
+    for batch_idx, (frames, labels) in enumerate(loader):
+        if batch_idx == 0:
+            print("  [DEBUG] first val batch loaded")
+        if (batch_idx + 1) % 50 == 0:
+            print(f"  [DEBUG] val batch {batch_idx+1}")
         frames = frames.to(device)
         labels = labels.to(device)
 
@@ -306,7 +326,7 @@ def evaluate(model, loader, criterion, device):
         preds = logits.argmax(dim=1)
         total_correct += (preds == labels).sum().item()
         total_samples += frames.size(0)
-
+    print('evaluate are done')
     return total_loss / total_samples, total_correct / total_samples
 
 
@@ -385,6 +405,7 @@ def main():
     print(f"Val samples:   {len(val_dataset)}")
 
     device = CONFIG.DEVICE
+    print(f'device is {CONFIG.DEVICE}')
     model = GestureTimeSeriesNet(CONFIG.NUM_CLASSES).to(device)
 
     criterion = nn.CrossEntropyLoss(label_smoothing=CONFIG.LABEL_SMOOTHING)

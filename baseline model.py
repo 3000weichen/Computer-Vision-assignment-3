@@ -38,7 +38,7 @@ class CONFIG:
     FRAME_ROOT  = os.path.join(BASE_DIR, "20bn-jester-v1")
 
     NUM_CLASSES = 27
-    MAX_TRAIN_SAMPLES = 5000  # 数据限制
+    MAX_TRAIN_SAMPLES = 10000  # 数据限制
 
     BATCH_SIZE  = 32
     NUM_WORKERS = 4
