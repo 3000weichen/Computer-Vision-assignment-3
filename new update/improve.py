@@ -37,10 +37,10 @@ class CONFIG:
     FRAME_ROOT  = os.path.join(BASE_DIR, "20bn-jester-v1")
 
     NUM_CLASSES = 27
-    MAX_TRAIN_SAMPLES = 10000     # 数据限制
-    FRAMES_PER_CLIP = 16          # 每个视频采样 8 帧
+    MAX_TRAIN_SAMPLES = 10000     # data-limited training
+    FRAMES_PER_CLIP = 16          # Each video use 16 frames
 
-    BATCH_SIZE  = 8            # 时序模型显存更吃紧，batch 稍微小一点
+    BATCH_SIZE  = 8               # Due to memory constraints with time series
     NUM_WORKERS = 16
     NUM_EPOCHS  = 25
     LR          = 3e-4
@@ -50,7 +50,7 @@ class CONFIG:
     IMG_SIZE = 112
     SEED     = 42
 
-    EARLY_STOP_PATIENCE = 6      # 连续 4 个 epoch val loss 无提升则停止
+    EARLY_STOP_PATIENCE = 6      # check val acc every epoch, stop if no improve
     LABEL_SMOOTHING = 0.1
 
 
@@ -78,13 +78,13 @@ def load_label_mapping(labels_csv: str):
 
 
 # ----------------------
-# Dataset：一条样本 = 一个子文件夹的多帧序列
+# Dataset
 # ----------------------
 class JesterMultiFrameDataset(Dataset):
     """
-    CSV 每行: "video_id;label_name"
-    帧目录: FRAME_ROOT/<video_id>/*.jpg
-    返回: Tensor [T, C, H, W] 以及标签
+    CSV each row: "video_id;label_name"
+    Frame dir: FRAME_ROOT/<video_id>/*.jpg
+    Returns: Tensor [T, C, H, W] and label
     """
 
     def __init__(
@@ -111,7 +111,7 @@ class JesterMultiFrameDataset(Dataset):
         df["video_id"] = df["video_id"].astype(str).str.strip()
         df["label_name"] = df["label_name"].astype(str).str.strip()
 
-        # 实际有哪些视频文件夹
+        # check available video ids
         available_ids = {
             name
             for name in os.listdir(frame_root)
@@ -147,25 +147,13 @@ class JesterMultiFrameDataset(Dataset):
             raise RuntimeError(f"No frames found in {video_dir}")
         return [os.path.join(video_dir, f) for f in files]
 
-    # def _sample_indices(self, num_frames: int) -> List[int]:
-    #     T = self.frames_per_clip
-    #     if num_frames >= T:
-    #         # 均匀采样 T 帧
-    #         indices = np.linspace(0, num_frames - 1, T, dtype=int).tolist()
-    #     else:
-    #         # 帧数不够: 重复某些帧填满 T
-    #         base = np.arange(num_frames)
-    #         reps = int(np.ceil(T / num_frames))
-    #         tiled = np.tile(base, reps)
-    #         indices = tiled[:T].tolist()
-    #     return indices
-
     def _sample_indices(self, num_frames: int) -> List[int]:
         """
-        TSN-style 采样:
-        - Train: 把视频均匀分成 T 段，每段内随机取 1 帧（Temporal Segment）
-        - Val/Test: 均匀采样 T 帧，保证可复现
+        TSN-style sampling:
+        - Train: divide video into T segments, randomly sample 1 frame from each segment
+        - Val/Test: evenly sample T frames for reproducibility
         """
+        
         T = self.frames_per_clip
         if num_frames <= 0:
             raise RuntimeError("Video has no frames")
@@ -178,16 +166,16 @@ class JesterMultiFrameDataset(Dataset):
                 for seg_idx in range(T):
                     start = int(np.floor(seg_idx * segment_length))
                     end   = int(np.floor((seg_idx + 1) * segment_length))
-                    # 确保区间合法
+                    # check boundary
                     if end <= start:
                         end = min(start + 1, num_frames)
                     idx = np.random.randint(start, end)
                     indices.append(idx)
             else:
-                # 帧数少于 T 时，允许重复随机采样
+                # if video shorter than T, randomly sample with replacement
                 indices = np.random.randint(0, num_frames, size=T).tolist()
 
-            return sorted(indices)  # 保持时间顺序
+            return sorted(indices)  # sort for temporal order
 
         # ---------- Val/Test: evenly spaced sampling ----------
         if num_frames >= T:
@@ -267,7 +255,7 @@ class GestureTimeSeriesNet(nn.Module):
         feat_dim = backbone.fc.in_features
         backbone.fc = nn.Identity()
 
-        # 冻结 backbone 的大部分参数，只微调 layer3/4
+        # Freeze early layers, fine-tune layer3 and layer4
         for name, param in backbone.named_parameters():
             param.requires_grad = False
         for name, param in backbone.layer3.named_parameters():
@@ -278,7 +266,7 @@ class GestureTimeSeriesNet(nn.Module):
         self.backbone = backbone
         self.feat_dim = feat_dim
 
-        # TRN-lite: 我们要把原始特征 feats 和差分特征 diff 拼在一起
+        # TRN-lite: input dim = feat_dim * 2 (original + diff)
         rnn_input_dim = feat_dim * 2
 
         self.rnn = nn.GRU(
@@ -299,19 +287,19 @@ class GestureTimeSeriesNet(nn.Module):
         feats = self.backbone(x)          # [B*T, F]
         feats = feats.view(B, T, self.feat_dim)   # [B, T, F]
 
-        # ---------- TRN-lite: 加入帧间差分关系 ----------
+        # ---------- TRN-lite: add frame-wise difference ----------
         # diff[t] = feats[t] - feats[t-1]
         diff = feats[:, 1:, :] - feats[:, :-1, :]           # [B, T-1, F]
-        # 在第一帧前面 pad 一个全零，使得 diff 和 feats 一样长
+        # add zero pad for first frame, so that diff has same length T
         zero_pad = torch.zeros(B, 1, self.feat_dim, device=feats.device, dtype=feats.dtype)
         diff = torch.cat([zero_pad, diff], dim=1)           # [B, T, F]
 
-        # 拼接原始特征和差分特征 → [B, T, 2F]
+        # get augmented features by concatenating original + diff
         feats_aug = torch.cat([feats, diff], dim=-1)
 
         out, _ = self.rnn(feats_aug)        # [B, T, 2H]
 
-        # 时间维做平均池化
+        # Temporal pooling: mean over time
         time_pooled = out.mean(dim=1)       # [B, 2H]
 
         time_pooled = self.dropout(time_pooled)
@@ -459,8 +447,8 @@ def main():
 
     optimizer = torch.optim.AdamW(
         [
-            {"params": backbone_params, "lr": CONFIG.LR * 0.3},  # backbone 用更小 LR
-            {"params": head_params,   "lr": CONFIG.LR},          # GRU + classifier 用原 LR
+            {"params": backbone_params, "lr": CONFIG.LR * 0.3},  # backbone need smaller LR
+            {"params": head_params,   "lr": CONFIG.LR},          # GRU + classifier use base LR
         ],
         weight_decay=CONFIG.WEIGHT_DECAY,
     )
@@ -496,7 +484,7 @@ def main():
             f"Val loss: {val_loss:.4f}, acc: {val_acc:.4f}"
         )
 
-        improve_eps = 1e-4  # 很小的阈值，避免浮点数问题
+        improve_eps = 1e-4  # use small epsilon to avoid float precision issue
         if val_acc > best_val_acc + improve_eps:
             best_val_acc = val_acc
             epochs_no_improve = 0

@@ -1,5 +1,4 @@
 """
-方向 1：正则化 + early stopping + LR 调度
 Improved baseline for Jester:
 - Stronger data augmentation
 - Dropout in classification head
@@ -29,25 +28,25 @@ import matplotlib.pyplot as plt
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 class CONFIG:
-    TRAIN_CSV   = os.path.join(BASE_DIR, "jester-v1-small-train.csv")   # 或 train.csv
+    TRAIN_CSV   = os.path.join(BASE_DIR, "jester-v1-small-train.csv")   # or train.csv
     VAL_CSV     = os.path.join(BASE_DIR, "jester-v1-validation.csv")
     LABELS_CSV  = os.path.join(BASE_DIR, "jester-v1-labels.csv")
     FRAME_ROOT  = os.path.join(BASE_DIR, "20bn-jester-v1")
 
     NUM_CLASSES = 27
-    MAX_TRAIN_SAMPLES = 10000     # 数据限制
+    MAX_TRAIN_SAMPLES = 10000     # data limiting
 
     BATCH_SIZE  = 32
     NUM_WORKERS = 4
-    NUM_EPOCHS  = 30             # 可以多给一点 epoch，early stopping 会帮我们停
+    NUM_EPOCHS  = 30             # use more epochs for early stopping
     LR          = 5e-4
-    WEIGHT_DECAY = 1e-3          # <<< 正则化
+    WEIGHT_DECAY = 1e-3          # normalization for AdamW
     DEVICE      = "cuda" if torch.cuda.is_available() else "cpu"
 
     IMG_SIZE = 112
     SEED     = 42
 
-    EARLY_STOP_PATIENCE = 5      # <<< 若 val loss 连续 5 个 epoch 没改善就停
+    EARLY_STOP_PATIENCE = 5      # early stopping patience
 
 
 # ----------------------
@@ -164,16 +163,15 @@ class JesterFrameFolderDataset(Dataset):
 
 
 # ----------------------
-# Transforms （改进版：更强的数据增强）
+# Transforms for data augmentation (stronger for training)
 # ----------------------
 def get_transforms(is_train: bool = True):
     if is_train:
         ops = [
             T.ToPILImage(),
-            # 随机裁剪 + resize，带一点 scale 变化，相当于增加视角变化
             T.RandomResizedCrop(CONFIG.IMG_SIZE, scale=(0.6, 1.0)),
             T.RandomHorizontalFlip(),
-            # 颜色抖动，提升泛化
+            # Color jitter for stronger augmentation, to avoid overfitting
             T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
             T.ToTensor(),
             T.Normalize(mean=[0.485, 0.456, 0.406],
@@ -191,7 +189,7 @@ def get_transforms(is_train: bool = True):
 
 
 # ----------------------
-# Model （增加 Dropout）
+# Model (add Dropout in head)
 # ----------------------
 class GestureImprovedNet(nn.Module):
     def __init__(self, num_classes: int):
@@ -199,11 +197,11 @@ class GestureImprovedNet(nn.Module):
         backbone = resnet18(weights=ResNet18_Weights.DEFAULT)
         in_features = backbone.fc.in_features
 
-        # 去掉原来的 fc，用自定义 head： Dropout + Linear
+        # remove final fc layer
         backbone.fc = nn.Identity()
         self.backbone = backbone
         self.classifier = nn.Sequential(
-            nn.Dropout(p=0.5),               # <<< Dropout 防止过拟合
+            nn.Dropout(p=0.5),               # use dropout to avoid overfitting
             nn.Linear(in_features, num_classes),
         )
 
@@ -369,8 +367,8 @@ def main():
             f"Val loss: {val_loss:.4f}, acc: {val_acc:.4f}"
         )
 
-        # Early stopping 根据 val loss
-        if val_loss < best_val_loss - 1e-3:   # 有明显改善
+        # Early stopping  val loss
+        if val_loss < best_val_loss - 1e-3:   # small epsilon to avoid float precision issue
             best_val_loss = val_loss
             best_val_acc = val_acc
             epochs_no_improve = 0

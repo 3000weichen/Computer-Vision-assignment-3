@@ -21,24 +21,23 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as T
-# import torchvision.models as models   # 不再需要
-from torchvision.models import resnet18, ResNet18_Weights  # <<< 新写法
-import matplotlib.pyplot as plt        # <<< 用于画图
+from torchvision.models import resnet18, ResNet18_Weights
+import matplotlib.pyplot as plt
 
 
 # ----------------------
-# Config（全部相对 baseline_model.py）
+# Configuration 
 # ----------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 class CONFIG:
-    TRAIN_CSV   = os.path.join(BASE_DIR, "jester-v1-small-train.csv")   # 或 train.csv
+    TRAIN_CSV   = os.path.join(BASE_DIR, "jester-v1-small-train.csv")
     VAL_CSV     = os.path.join(BASE_DIR, "jester-v1-validation.csv")
     LABELS_CSV  = os.path.join(BASE_DIR, "jester-v1-labels.csv")
     FRAME_ROOT  = os.path.join(BASE_DIR, "20bn-jester-v1")
 
     NUM_CLASSES = 27
-    MAX_TRAIN_SAMPLES = 10000  # 数据限制
+    MAX_TRAIN_SAMPLES = 10000  # data limiting to 10k samples
 
     BATCH_SIZE  = 32
     NUM_WORKERS = 4
@@ -73,13 +72,13 @@ def load_label_mapping(labels_csv: str):
 
 
 # ----------------------
-# Dataset：一条样本 = 一个子文件夹的中间帧
+# Dataset 
 # ----------------------
 class JesterFrameFolderDataset(Dataset):
     """
-    CSV 每行: "video_id;label_name"
-    对应帧目录: FRAME_ROOT/<video_id>/*.jpg
-    例如 video_id="4" -> 20bn-jester-v1/4/00001.jpg ...
+    CSV each line: "video_id;label_name"
+    Corresponding frames dir: FRAME_ROOT/<video_id>/*.jpg
+    For example video_id="4" -> 20bn-jester-v1/4/00001.jpg ...
     """
 
     def __init__(
@@ -101,18 +100,18 @@ class JesterFrameFolderDataset(Dataset):
             df = df[0].str.split(";", expand=True)
         df.columns = ["video_id", "label_name"]
 
-        # 去掉可能的空格
+        # remove leading/trailing spaces
         df["video_id"] = df["video_id"].astype(str).str.strip()
         df["label_name"] = df["label_name"].astype(str).str.strip()
 
-        # 先拿到本地实际有哪些视频文件夹
+        # get available video IDs from local frame folders
         available_ids = {
             name
             for name in os.listdir(frame_root)
             if os.path.isdir(os.path.join(frame_root, name)) and name.isdigit()
         }
 
-        # 过滤掉本地不存在的视频
+        # filter out samples whose frames do not exist
         before = len(df)
         df = df[df["video_id"].isin(available_ids)].reset_index(drop=True)
         missing = before - len(df)
@@ -122,7 +121,7 @@ class JesterFrameFolderDataset(Dataset):
                 f"do not exist under {os.path.basename(frame_root)} and will be skipped."
             )
 
-        # 再应用 data-limited 抽样
+        # use only a subset if specified
         if max_samples is not None and len(df) > max_samples:
             df = df.sample(n=max_samples, random_state=CONFIG.SEED).reset_index(drop=True)
 
@@ -193,7 +192,7 @@ def get_transforms(is_train: bool = True):
 class GestureBaselineNet(nn.Module):
     def __init__(self, num_classes: int):
         super().__init__()
-        # <<< 使用 weights API，去掉 pretrained 警告
+        # use pretrained ResNet18
         self.backbone = resnet18(weights=ResNet18_Weights.DEFAULT)
         in_features = self.backbone.fc.in_features
         self.backbone.fc = nn.Linear(in_features, num_classes)
@@ -251,7 +250,10 @@ def evaluate(model, loader, criterion, device):
 # Plot helpers
 # ----------------------
 def plot_history(history, out_dir: str = BASE_DIR):
-    """绘制 loss 和 accuracy 曲线，并保存为 PNG 文件。"""
+    """
+    create loss and accuracy curves and save to files.
+    history: dict with keys "train_loss", "val_loss", "train_acc", "val_acc"
+    """
     epochs = range(1, len(history["train_loss"]) + 1)
 
     # Loss 曲线
@@ -330,7 +332,10 @@ def main():
 
     best_val_acc = 0.0
 
-    # <<< 用于画图的历史记录
+    # ----------------------
+    # Training loop
+    # ----------------------
+    
     history = {"train_loss": [], "val_loss": [], "train_acc": [], "val_acc": []}
 
     for epoch in range(1, CONFIG.NUM_EPOCHS + 1):
@@ -353,7 +358,7 @@ def main():
             torch.save(model.state_dict(), os.path.join(BASE_DIR, "baseline_best.pth"))
             print(f"  -> New best val acc: {best_val_acc:.4f}, model saved.")
 
-    # <<< 训练结束后画图
+    # Plot training curves
     plot_history(history, out_dir=BASE_DIR)
     print("Saved curves to 'baseline_loss_curves.png' and 'baseline_accuracy_curves.png'.")
 
